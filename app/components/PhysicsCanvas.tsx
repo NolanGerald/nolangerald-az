@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import Matter from "matter-js";
+import DebugPanel from "./DebugPanel";
 
 const STATIC_DENSITY = 15;
 const PARTICLE_SIZES = [12, 18, 24];
@@ -19,6 +20,14 @@ const PhysicsCanvas: React.FC = () => {
   const [gyroEnabled, setGyroEnabled] = useState(false);
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [orientation, setOrientation] = useState({ alpha: 0, beta: 0, gamma: 0 });
+  const [isMounted, setIsMounted] = useState(false);
+  const [debugLog, setDebugLog] = useState<string[]>([]);
+  const engineRef = useRef<any>(null);
+  const gyroEnabledRef = useRef(false);
+
+  const addDebugLog = (message: string) => {
+    setDebugLog(prev => [...prev.slice(-4), `${new Date().getSeconds()}s: ${message}`]);
+  };
 
   const handleResize = () => {
     if (boxRef.current) {
@@ -91,10 +100,10 @@ const PhysicsCanvas: React.FC = () => {
 
   // Toggle gyroscope on/off
   const onGyroToggle = async (enabled: boolean) => {
-    console.log('Toggle function called with:', enabled);
-    console.log('Current gyroEnabled state:', gyroEnabled);
+    addDebugLog(`Toggle: ${enabled}`);
     
     setGyroEnabled(enabled);
+    gyroEnabledRef.current = enabled;
     
     if (enabled) {
       console.log('Enabling gyroscope...');
@@ -118,33 +127,38 @@ const PhysicsCanvas: React.FC = () => {
     }
   };
 
-  // Orientation handler function (defined at component level)
+  // Orientation handler function (based on Matter.js gyro example)
   const handleOrientation = (event: DeviceOrientationEvent) => {
-    console.log('Orientation event received:', event);
+    addDebugLog('Event fired!');
     
     const alpha = event.alpha || 0;
     const beta = event.beta || 0;
     const gamma = event.gamma || 0;
     
-    console.log('Values:', { alpha, beta, gamma });
+    const currentEngine = engineRef.current;
+    const currentGyroEnabled = gyroEnabledRef.current;
+    
+    addDebugLog(`β:${beta.toFixed(1)} γ:${gamma.toFixed(1)} E:${!!currentEngine} G:${currentGyroEnabled}`);
     
     // Update orientation state for debugging
     setOrientation({ alpha, beta, gamma });
     
-    if (!engine || !gyroEnabled) return;
+    if (!currentEngine || !currentGyroEnabled) {
+      addDebugLog('Early return - engine or gyro not ready');
+      return;
+    }
     
-    // Use gamma for left/right tilt (-90 to 90 degrees)
-    // Convert gamma to gravity values
-    // gamma: -90 (tilted left) to 90 (tilted right)
-    // Normalize to -1 to 1 and scale for gravity strength
-    const gravityX = Math.max(-1, Math.min(1, gamma / 45)) * 0.002; // Increased strength
-    const gravityY = 0.002; // Increased base gravity
+    // Use both beta and gamma to control gravity in all directions (like the Matter.js examples)
+    // This allows proper physics when phone is rotated to any orientation, including upside down
+    // Scale values: gamma/beta typically range from -90 to +90, so 0.01 gives gravity range of -0.9 to +0.9
+    const gravityX = gamma * 0.01; // Scale gamma for X-axis gravity  
+    const gravityY = beta * 0.01;  // Scale beta for Y-axis gravity
     
-    console.log('Setting gravity:', { gravityX, gravityY });
+    addDebugLog(`gX:${gravityX.toFixed(2)} gY:${gravityY.toFixed(2)}`);
     
     // Update engine gravity
-    engine.world.gravity.x = gravityX;
-    engine.world.gravity.y = gravityY;
+    currentEngine.world.gravity.x = gravityX;
+    currentEngine.world.gravity.y = gravityY;
   };
 
   // Setup device orientation listener
@@ -201,6 +215,11 @@ const PhysicsCanvas: React.FC = () => {
     };
   }, [hasDropped]);
 
+  // Set mounted state to prevent hydration errors
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
   useEffect(() => {
     if (!boxRef.current || !canvasRef.current) return;
 
@@ -251,6 +270,7 @@ const PhysicsCanvas: React.FC = () => {
     setConstraints(boxRef.current.getBoundingClientRect());
     setScene(render);
     setEngine(matterEngine);
+    engineRef.current = matterEngine;
 
     window.addEventListener("resize", handleResize);
 
@@ -265,10 +285,20 @@ const PhysicsCanvas: React.FC = () => {
     if (scene && constraints && isVisible && !hasDropped) {
       let { width, height } = constraints;
       
-      // Drop 40 balls with 3 different sizes
-      for (let i = 0; i < 40; i++) {
+      // Drop 70 balls with 3 different sizes
+      for (let i = 0; i < 70; i++) {
         const randomX = Math.floor(Math.random() * width);
-        const randomSize = PARTICLE_SIZES[Math.floor(Math.random() * PARTICLE_SIZES.length)];
+        // Weighted random selection favoring smaller circles
+        // 60% chance of size 12, 30% chance of size 18, 10% chance of size 24
+        const rand = Math.random();
+        let randomSize;
+        if (rand < 0.6) {
+          randomSize = PARTICLE_SIZES[0]; // 12 (smallest)
+        } else if (rand < 0.9) {
+          randomSize = PARTICLE_SIZES[1]; // 18 (medium)  
+        } else {
+          randomSize = PARTICLE_SIZES[2]; // 24 (largest)
+        }
         const randomY = -randomSize - (i * 10); // Stagger the drop heights
         
         Matter.World.add(
@@ -276,7 +306,9 @@ const PhysicsCanvas: React.FC = () => {
           Matter.Bodies.circle(randomX, randomY, randomSize, {
             restitution: PARTICLE_BOUNCYNESS,
             render: {
-              fillStyle: `hsl(${Math.random() * 360}, 80%, 60%)`
+              fillStyle: "transparent",
+              strokeStyle: ["#4A90E2", "#640D5F", "#EA2264", "#F78D60"][Math.floor(Math.random() * 4)],
+              lineWidth: 2
             }
           })
         );
@@ -339,52 +371,53 @@ const PhysicsCanvas: React.FC = () => {
         left: 0,
         width: "100%",
         height: "100%",
-        zIndex: 996
+        zIndex: 996,
+        touchAction: "none" // Prevent scrolling on touch devices
       }}
     >
       <canvas ref={canvasRef} />
-      {/* Debug orientation values */}
+      
+      {/* Large background gamma value */}
       <div
         style={{
           position: "absolute",
-          top: "10px",
-          left: "10px",
-          zIndex: 1000,
-          background: "rgba(0,0,0,0.7)",
-          color: "white",
-          padding: "8px 12px",
-          borderRadius: "8px",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          fontSize: "300px",
+          color: "rgba(255, 255, 255, 0.02)",
           fontFamily: "monospace",
-          fontSize: "12px",
-          lineHeight: "1.4"
+          fontWeight: "bold",
+          zIndex: 100,
+          pointerEvents: "none",
+          userSelect: "none"
         }}
       >
-        <div>α: {orientation.alpha.toFixed(1)}°</div>
-        <div>β: {orientation.beta.toFixed(1)}°</div>
-        <div>γ: {orientation.gamma.toFixed(1)}°</div>
-        <div style={{ marginTop: "4px", fontSize: "10px", opacity: 0.8 }}>
-          Permission: {permissionGranted ? "✓" : "✗"}<br/>
-          HTTPS: {window.location.protocol === 'https:' ? "✓" : "✗"}<br/>
-          Mobile: {/Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ? "✓" : "✗"}
-        </div>
+        {Math.abs(orientation.gamma).toFixed(0)}
       </div>
+      
+      
       <button
         style={{
           position: "absolute",
           top: "10px",
           right: "10px",
           zIndex: 1000,
-          padding: "12px 20px",
-          background: gyroEnabled ? "#4CAF50" : "#f44336",
-          color: "white",
-          border: "none",
-          borderRadius: "8px",
-          fontSize: "16px",
-          fontWeight: "bold",
+          padding: "10px 20px",
+          background: "transparent",
+          color: gyroEnabled ? "#10b981" : "#ef4444",
+          border: `2px solid ${gyroEnabled ? "#10b981" : "#ef4444"}`,
+          borderRadius: "12px",
+          fontSize: "12px",
+          fontWeight: "600",
           cursor: "pointer",
           touchAction: "manipulation",
           userSelect: "none",
-          WebkitTapHighlightColor: "transparent"
+          WebkitTapHighlightColor: "transparent",
+          transition: "all 0.2s ease-in-out",
+          backdropFilter: "blur(10px)",
+          WebkitBackdropFilter: "blur(10px)",
+          boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)"
         }}
         onClick={(e) => {
           console.log('Button clicked, current state:', gyroEnabled);
