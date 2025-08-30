@@ -3,12 +3,28 @@
 import React, { useEffect, useRef, useState } from "react";
 import Matter from "matter-js";
 import DebugPanel from "./DebugPanel";
+import { useMobileDetection } from "./useMobileDetection";
+import GyroIcon from "./GyroIcon";
 
 const STATIC_DENSITY = 15;
 const PARTICLE_SIZES = [12, 18, 24];
 const PARTICLE_BOUNCYNESS = 0.9;
+const BALL_COUNT_MOBILE = 100;
+const BALL_COUNT_DESKTOP = 350;
 
-const PhysicsCanvas: React.FC = () => {
+// Ball color hex values
+const BALL_COLORS = {
+  BLUE: "#4A90E2",
+  PURPLE: "#640D5F", 
+  PINK: "#EA2264",
+  ORANGE: "#F78D60"
+};
+
+interface PhysicsCanvasProps {
+  onBallsDropped?: () => void;
+}
+
+const PhysicsCanvas: React.FC<PhysicsCanvasProps> = ({ onBallsDropped }) => {
   const boxRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -24,6 +40,9 @@ const PhysicsCanvas: React.FC = () => {
   const [debugLog, setDebugLog] = useState<string[]>([]);
   const engineRef = useRef<any>(null);
   const gyroEnabledRef = useRef(false);
+  
+  // Mobile detection
+  const { isMobile, hasTouch, hasOrientation } = useMobileDetection();
 
   const addDebugLog = (message: string) => {
     setDebugLog(prev => [...prev.slice(-4), `${new Date().getSeconds()}s: ${message}`]);
@@ -226,6 +245,8 @@ const PhysicsCanvas: React.FC = () => {
     let Engine = Matter.Engine;
     let Render = Matter.Render;
     let World = Matter.World;
+    let Mouse = Matter.Mouse;
+    let MouseConstraint = Matter.MouseConstraint;
 
     let matterEngine = Engine.create({});
 
@@ -264,13 +285,98 @@ const PhysicsCanvas: React.FC = () => {
 
     World.add(matterEngine.world, [floor, leftWall, rightWall]);
 
+
+
+    // Different interaction for desktop vs mobile
+    if (isMobile) {
+      // Mobile: Traditional drag interaction
+      let mouse = Mouse.create(render.canvas);
+      let mouseConstraint = MouseConstraint.create(matterEngine, {
+        mouse: mouse,
+        constraint: {
+          stiffness: 0.8,
+          damping: 0.1,
+          render: {
+            visible: false
+          }
+        }
+      });
+      
+      // Force release constraint on touch events
+      const releaseConstraint = () => {
+        if (mouseConstraint.constraint.bodyB) {
+          // Restore the body's physics properties
+          const body = mouseConstraint.constraint.bodyB;
+          body.isStatic = false;
+          body.isSleeping = false;
+          Matter.Sleeping.set(body, false);
+          mouseConstraint.constraint.bodyB = null;
+        }
+        if (mouseConstraint.constraint.bodyA) {
+          mouseConstraint.constraint.bodyA = null;
+        }
+        mouseConstraint.constraint.pointA = { x: 0, y: 0 };
+        mouseConstraint.constraint.pointB = { x: 0, y: 0 };
+      };
+      
+      render.canvas.addEventListener('touchend', releaseConstraint);
+      render.canvas.addEventListener('touchcancel', releaseConstraint);
+      render.canvas.addEventListener('touchleave', releaseConstraint);
+      
+      // Also listen for mouse events as fallback
+      render.canvas.addEventListener('mouseup', releaseConstraint);
+      render.canvas.addEventListener('mouseleave', releaseConstraint);
+      
+      World.add(matterEngine.world, mouseConstraint);
+      render.mouse = mouse;
+    } else {
+      // Desktop: Mouse cursor as physical body
+      let mouse = Mouse.create(render.canvas);
+      render.mouse = mouse;
+      
+      // Create dynamic mouse body that follows cursor and creates collisions
+      let mouseBody = Matter.Bodies.circle(0, 0, 12, {
+        density: 0.01,
+        frictionAir: 0.1,
+        restitution: 0.8,
+        render: {
+          visible: false
+        }
+      });
+      
+      World.add(matterEngine.world, mouseBody);
+      
+      let lastMousePosition = { x: 0, y: 0 };
+      
+      // Update mouse body with velocity for dynamic collisions
+      const updateMouseBody = () => {
+        if (mouse.position.x && mouse.position.y) {
+          const currentPos = mouse.position;
+          
+          // Calculate velocity based on mouse movement
+          const velocityX = (currentPos.x - lastMousePosition.x) * 0.5;
+          const velocityY = (currentPos.y - lastMousePosition.y) * 0.5;
+          
+          // Set position and velocity for dynamic collisions
+          Matter.Body.setPosition(mouseBody, currentPos);
+          Matter.Body.setVelocity(mouseBody, { x: velocityX, y: velocityY });
+          
+          lastMousePosition = { x: currentPos.x, y: currentPos.y };
+        }
+        requestAnimationFrame(updateMouseBody);
+      };
+      updateMouseBody();
+    }
+
     Engine.run(matterEngine);
     Render.run(render);
+
 
     setConstraints(boxRef.current.getBoundingClientRect());
     setScene(render);
     setEngine(matterEngine);
     engineRef.current = matterEngine;
+
 
     window.addEventListener("resize", handleResize);
 
@@ -285,34 +391,44 @@ const PhysicsCanvas: React.FC = () => {
     if (scene && constraints && isVisible && !hasDropped) {
       let { width, height } = constraints;
       
-      // Drop 70 balls with 3 different sizes
-      for (let i = 0; i < 70; i++) {
-        const randomX = Math.floor(Math.random() * width);
-        // Weighted random selection favoring smaller circles
-        // 60% chance of size 12, 30% chance of size 18, 10% chance of size 24
-        const rand = Math.random();
-        let randomSize;
-        if (rand < 0.6) {
-          randomSize = PARTICLE_SIZES[0]; // 12 (smallest)
-        } else if (rand < 0.9) {
-          randomSize = PARTICLE_SIZES[1]; // 18 (medium)  
-        } else {
-          randomSize = PARTICLE_SIZES[2]; // 24 (largest)
-        }
-        const randomY = -randomSize - (i * 10); // Stagger the drop heights
-        
-        Matter.World.add(
-          scene.engine.world,
-          Matter.Bodies.circle(randomX, randomY, randomSize, {
-            restitution: PARTICLE_BOUNCYNESS,
-            render: {
-              fillStyle: "transparent",
-              strokeStyle: ["#4A90E2", "#640D5F", "#EA2264", "#F78D60"][Math.floor(Math.random() * 4)],
-              lineWidth: 2
-            }
-          })
-        );
+      // Drop balls with 3 different sizes, spaced over 1 second
+      // More balls on desktop vs mobile
+      const ballCount = isMobile ? BALL_COUNT_MOBILE : BALL_COUNT_DESKTOP;
+      for (let i = 0; i < ballCount; i++) {
+        setTimeout(() => {
+          const randomX = Math.floor(Math.random() * width);
+          // Weighted random selection favoring smaller circles
+          // 60% chance of size 12, 30% chance of size 18, 10% chance of size 24
+          const rand = Math.random();
+          let randomSize;
+          if (rand < 0.6) {
+            randomSize = PARTICLE_SIZES[0]; // 12 (smallest)
+          } else if (rand < 0.9) {
+            randomSize = PARTICLE_SIZES[1]; // 18 (medium)  
+          } else {
+            randomSize = PARTICLE_SIZES[2]; // 24 (largest)
+          }
+          const randomY = -randomSize; // Start from top
+          
+          Matter.World.add(
+            scene.engine.world,
+            Matter.Bodies.circle(randomX, randomY, randomSize, {
+              restitution: PARTICLE_BOUNCYNESS,
+              render: {
+                fillStyle: "transparent",
+                strokeStyle: [BALL_COLORS.BLUE, BALL_COLORS.PURPLE, BALL_COLORS.PINK, BALL_COLORS.ORANGE][Math.floor(Math.random() * 4)],
+                lineWidth: 2
+              }
+            })
+          );
+          
+          // Call onBallsDropped when the last ball is dropped
+          if (i === ballCount - 1 && onBallsDropped) {
+            onBallsDropped();
+          }
+        }, (i / ballCount) * 1000); // Spread over 1000ms (1 second)
       }
+      
       
       setHasDropped(true);
     }
@@ -371,64 +487,104 @@ const PhysicsCanvas: React.FC = () => {
         left: 0,
         width: "100%",
         height: "100%",
-        zIndex: 996,
+        zIndex: 5,
         touchAction: "none" // Prevent scrolling on touch devices
       }}
     >
       <canvas ref={canvasRef} />
       
-      {/* Large background gamma value */}
-      <div
-        style={{
-          position: "absolute",
-          top: "50%",
-          left: "50%",
-          transform: "translate(-50%, -50%)",
-          fontSize: "300px",
-          color: "rgba(255, 255, 255, 0.02)",
-          fontFamily: "monospace",
-          fontWeight: "bold",
-          zIndex: 100,
-          pointerEvents: "none",
-          userSelect: "none"
-        }}
-      >
-        {Math.abs(orientation.gamma).toFixed(0)}
-      </div>
+      {/* Large background gamma value - only show on mobile */}
+      {isMobile && (
+        <div
+          suppressHydrationWarning
+          style={{
+            position: "absolute",
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%, -50%)",
+            fontSize: "300px",
+            color: "rgba(255, 255, 255, 0.02)",
+            fontFamily: "monospace",
+            fontWeight: "bold",
+            zIndex: 100,
+            pointerEvents: "none",
+            userSelect: "none"
+          }}
+        >
+          {isMounted ? Math.abs(orientation.gamma).toFixed(0) : "0"}
+        </div>
+      )}
       
       
-      <button
-        style={{
-          position: "absolute",
-          top: "10px",
-          right: "10px",
-          zIndex: 1000,
-          padding: "10px 20px",
-          background: "transparent",
-          color: gyroEnabled ? "#10b981" : "#ef4444",
-          border: `2px solid ${gyroEnabled ? "#10b981" : "#ef4444"}`,
-          borderRadius: "12px",
-          fontSize: "12px",
-          fontWeight: "600",
-          cursor: "pointer",
-          touchAction: "manipulation",
-          userSelect: "none",
-          WebkitTapHighlightColor: "transparent",
-          transition: "all 0.2s ease-in-out",
-          backdropFilter: "blur(10px)",
-          WebkitBackdropFilter: "blur(10px)",
-          boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)"
-        }}
-        onClick={(e) => {
-          console.log('Button clicked, current state:', gyroEnabled);
-          onGyroToggle(!gyroEnabled);
-        }}
-        onTouchStart={(e) => {
-          console.log('Button touched, current state:', gyroEnabled);
-        }}
-      >
-        {gyroEnabled ? "GYRO ON" : "GYRO OFF"}
-      </button>
+      {/* Faint angle display in top left corner - only show when gyro is enabled */}
+      {isMobile && gyroEnabled && (
+        <div
+          style={{
+            position: "absolute",
+            top: "20px",
+            left: "20px",
+            color: "rgba(255, 255, 255, 0.5)",
+            fontSize: "24px",
+            fontFamily: "monospace",
+            fontWeight: "bold",
+            pointerEvents: "none",
+            userSelect: "none",
+            zIndex: 100,
+            width: "48px", // Fixed width to accommodate 2 digits + degree symbol
+            display: "flex"
+          }}
+        >
+          <span style={{ width: "13px", textAlign: "right" }}>
+            {Math.abs(orientation.gamma).toFixed(0).length > 1 ? Math.abs(orientation.gamma).toFixed(0).charAt(0) : ''}
+          </span>
+          <span style={{ width: "13px", textAlign: "center" }}>
+            {Math.abs(orientation.gamma).toFixed(0).length > 1 ? Math.abs(orientation.gamma).toFixed(0).charAt(1) : Math.abs(orientation.gamma).toFixed(0)}
+          </span>
+          <span style={{ width: "13px", textAlign: "left" }}>°</span>
+        </div>
+      )}
+
+      {/* Only show gyro button on mobile devices */}
+      {isMobile && isMounted && (
+        <button
+          style={{
+            position: "absolute",
+            top: "20px",
+            right: "20px",
+            zIndex: 1000,
+            width: "56px",
+            height: "56px",
+            padding: "0",
+            background: "rgba(0, 0, 0, 0.1)",
+            color: gyroEnabled ? "#10b981" : "#6b7280",
+            border: `2px solid ${gyroEnabled ? "#10b981" : "#6b7280"}`,
+            borderRadius: "50%",
+            cursor: "pointer",
+            touchAction: "manipulation",
+            userSelect: "none",
+            WebkitTapHighlightColor: "transparent",
+            transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+            backdropFilter: "blur(20px)",
+            WebkitBackdropFilter: "blur(20px)",
+            boxShadow: gyroEnabled 
+              ? "0 8px 25px -8px rgba(16, 185, 129, 0.4), 0 0 0 1px rgba(16, 185, 129, 0.1)" 
+              : "0 4px 12px -4px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(255, 255, 255, 0.05)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            transform: gyroEnabled ? "scale(1.05)" : "scale(1)"
+          }}
+          onClick={(e) => {
+            console.log('Button clicked, current state:', gyroEnabled);
+            onGyroToggle(!gyroEnabled);
+          }}
+          onTouchStart={(e) => {
+            console.log('Button touched, current state:', gyroEnabled);
+          }}
+        >
+          <GyroIcon isActive={gyroEnabled} size={52} />
+        </button>
+      )}
     </div>
   );
 };
